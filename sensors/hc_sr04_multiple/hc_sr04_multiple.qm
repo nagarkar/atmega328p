@@ -1,0 +1,269 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<model version="4.1.2" links="0">
+ <documentation>See Readme.md</documentation>
+ <framework name="qpn"/>
+ <package name="AOs" stereotype="0x02">
+  <class name="HCSR04" superclass="qpn::QActive">
+   <attribute name="sensor" type="ST_HW_HC_SR04 *" visibility="0x00" properties="0x00"/>
+   <attribute name="echo_start_time = 0" type="long" visibility="0x00" properties="0x00"/>
+   <attribute name="echo_time = 0" type="long" visibility="0x00" properties="0x00"/>
+   <attribute name="distance_cm = 0" type="int" visibility="0x00" properties="0x00"/>
+   <attribute name="n_measurements = 0" type="unsigned long" visibility="0x00" properties="0x00"/>
+   <attribute name="start_time_micros" type="unsigned long" visibility="0x00" properties="0x00"/>
+   <statechart>
+    <initial target="../1">
+     <action>me-&gt;start_time_micros = micros();</action>
+     <initial_glyph conn="2,3,5,0,24,9">
+      <action box="0,-2,6,2"/>
+     </initial_glyph>
+    </initial>
+    <state name="wait_for_echo">
+     <entry brief="trigger pulse">QActive_armX((QActive *)me, 0U, BSP_TICKS_PER_SEC/10, 0);
+
+me-&gt;echo_time = 0;
+me-&gt;distance_cm = 0;
+
+me-&gt;sensor-&gt;triggerPulse();
+
+//Serial.println(&quot;ST&quot;);</entry>
+     <exit brief="disarm timeout">QActive_disarmX((QActive *)me, 0U);</exit>
+     <tran trig="Q_TIMEOUT" target="..">
+      <action brief="reset to zero">//Serial.print(&quot;Timeout1&quot;);</action>
+      <tran_glyph conn="14,20,3,2,-6,5,8,-2">
+       <action box="-12,6,13,6"/>
+      </tran_glyph>
+     </tran>
+     <tran trig="ECHO_START" target="../../2">
+      <action>me-&gt;echo_start_time = micros();
+//Serial.println((unsigned int)me-&gt;echo_start_time);</action>
+      <tran_glyph conn="24,23,2,3,12,14">
+       <action box="0,7,10,2"/>
+      </tran_glyph>
+     </tran>
+     <state_glyph node="14,12,22,11">
+      <entry box="1,2,18,2"/>
+      <exit box="1,4,21,2"/>
+     </state_glyph>
+    </state>
+    <state name="wait_for_echo_done">
+     <entry brief="arm timout">QActive_armX((QActive *)me, 0U, BSP_TICKS_PER_SEC/10, 0);
+
+//Serial.println(&quot;In Done&quot;);</entry>
+     <exit brief="disarm timeout">QActive_disarmX((QActive *)me, 0U);</exit>
+     <tran trig="ECHO_END" target="../../1">
+      <action>unsigned long now = micros();
+//Serial.println((unsigned int)now);
+
+me-&gt;echo_time = max(0, now - me-&gt;echo_start_time);
+
+// Divide by 2 to account for the roundtrip
+// 29 is a fixed constant based on the speed of sound.
+me-&gt;distance_cm = me-&gt;echo_time/(2*29);
+
+//Serial.println(&quot;Distance:&quot;);
+//Serial.println(me-&gt;distance_cm);
+//Serial.println(&quot;Time:&quot;);Serial.println(me-&gt;echo_time);
+
+me-&gt;n_measurements++;</action>
+      <tran_glyph conn="60,37,1,1,17,-20,-41">
+       <action box="0,-2,16,5"/>
+      </tran_glyph>
+     </tran>
+     <tran trig="Q_TIMEOUT" target="../../1">
+      <action>//Serial.print(&quot;Timeout2&quot;);</action>
+      <tran_glyph conn="41,40,2,2,3,-23,-20">
+       <action box="-18,4,10,2"/>
+      </tran_glyph>
+     </tran>
+     <state_glyph node="38,30,22,10">
+      <entry box="1,2,11,2"/>
+      <exit box="1,4,13,2"/>
+     </state_glyph>
+    </state>
+    <state_diagram size="116,57"/>
+   </statechart>
+  </class>
+  <class name="HCSR04Meas" superclass="qpn::QActive">
+   <attribute name="AO_HCSR04" type="HCSR04 *" visibility="0x00" properties="0x00"/>
+   <statechart>
+    <initial target="../1">
+     <action>QActive_armX((QActive *)me, 0U, 10*BSP_TICKS_PER_SEC, 10*BSP_TICKS_PER_SEC);</action>
+     <initial_glyph conn="18,5,5,0,11,5">
+      <action box="0,-2,10,2"/>
+     </initial_glyph>
+    </initial>
+    <state name="Measure">
+     <entry brief="print metrics">unsigned long nMeasurements = me-&gt;AO_HCSR04-&gt;n_measurements;
+unsigned long start_time = me-&gt;AO_HCSR04-&gt;start_time_micros;
+float elapsed_time_sec= ((float)micros() - start_time)/(1000*1000);
+
+Serial.print(&quot;nMeasurements:&quot;);
+Serial.println(nMeasurements);
+Serial.print(&quot;Meas/sec:&quot;);
+Serial.println(nMeasurements/elapsed_time_sec);</entry>
+     <tran trig="Q_TIMEOUT" target="..">
+      <tran_glyph conn="54,16,1,2,12,19,-35,-9">
+       <action box="0,-2,10,2"/>
+      </tran_glyph>
+     </tran>
+     <state_glyph node="19,10,35,16">
+      <entry box="1,2,12,2"/>
+     </state_glyph>
+    </state>
+    <state_diagram size="80,50"/>
+   </statechart>
+  </class>
+ </package>
+ <directory name=".">
+  <file name="hc_sr04_multiple.ino">
+   <text>#define Q_PARAM_SIZE 4 // 32 bit parameters (e.g. pointers) passed between events.
+
+
+#include &quot;qpn.h&quot;     // QP-nano framework
+#include &quot;Arduino.h&quot; // Arduino API
+#include &lt;PciManager.h&gt;
+#include &lt;PciListenerImp.h&gt;
+#include &lt;ST_HW_HC_SR04.h&gt;
+
+
+#define SR04_TRIG_PIN_0 8
+#define SR04_ECHO_PIN_0 7
+
+
+//============================================================================
+// various constants for the application...
+enum {
+    BSP_TICKS_PER_SEC = 1000, // number of system clock ticks in one second
+};
+
+enum Signals {
+ ECHO_START_SIG = Q_USER_SIG,
+ ECHO_END_SIG,
+ MAXSIGS
+};
+
+
+//============================================================================
+// declare all AO classes...
+$declare(AOs::HCSR04)
+$declare(AOs::HCSR04Meas)
+//...
+
+
+// Create Pin Change Listeners
+void onPinChange(byte pin, byte changeKind);
+PciListenerImp listener(SR04_ECHO_PIN_0, onPinChange);
+
+// Create Sensors
+ST_HW_HC_SR04 ultrasonicSensor_0(SR04_TRIG_PIN_0, SR04_ECHO_PIN_0);
+ST_HW_HC_SR04 sensors[] = {ultrasonicSensor_0};
+
+
+// Create AO instances and event queue buffers for them...
+HCSR04 AO_HCSR04;
+HCSR04Meas AO_HCSR04Meas;
+
+// Define the pinchange event handler
+void onPinChange(byte pin, byte changeKind) {
+    //Serial.print(&quot;Pn:&quot;); Serial.println(pin);
+//    Serial.print(&quot;Ck:&quot;); Serial.println(changeKind);
+    if (pin == SR04_ECHO_PIN_0) {
+        if (changeKind == CHANGEKIND_LOW_TO_HIGH) {
+            QActive_postXISR_((QActive *)&amp;AO_HCSR04, 1U, ECHO_START_SIG, 0U);
+            //Serial.print(&quot;Posted ISR0&quot;); 
+            //Serial.println((unsigned int)micros());
+        } else if (changeKind == CHANGEKIND_HIGH_TO_LOW) {
+            QActive_postXISR_((QActive *)&amp;AO_HCSR04, 1U, ECHO_END_SIG, 0U);
+            //Serial.print(&quot;Posted ISR1&quot;); 
+            //Serial.println((unsigned int)micros());
+        }
+    }
+}
+static QEvt l_HCSR04QSto[10];
+static QEvt l_HCSR04MeasQSto[10];
+//...
+
+//============================================================================
+// QF_active[] array defines all active object control blocks ----------------
+QActiveCB const Q_ROM QF_active[] = {
+    { (QActive *)0,               (QEvt *)0,        0U                  },
+    { (QActive *)&amp;AO_HCSR04,      l_HCSR04QSto,     Q_DIM(l_HCSR04QSto) },
+    { (QActive *)&amp;AO_HCSR04Meas,  l_HCSR04MeasQSto, Q_DIM(l_HCSR04MeasQSto) }
+};
+
+
+//............................................................................
+void setup() {
+    // initialize the QF-nano framework
+    QF_init(Q_DIM(QF_active));
+
+    // initialize all AOs...
+    AO_HCSR04.sensor = &amp;ultrasonicSensor_0;
+    QActive_ctor(&amp;AO_HCSR04.super,     Q_STATE_CAST(&amp;HCSR04_initial));
+
+    AO_HCSR04Meas.AO_HCSR04 = &amp;AO_HCSR04;
+    QActive_ctor(&amp;AO_HCSR04Meas.super, Q_STATE_CAST(&amp;HCSR04Meas_initial));
+
+    Serial.begin(38400);
+    PciManager.registerListener(&amp;listener);
+    Serial.println(&quot;ready&quot;);
+}
+
+//............................................................................
+void loop() {
+    QF_run(); // run the QF-nano framework
+}
+
+//============================================================================
+// interrupts...
+ISR(TIMER2_COMPA_vect) {
+    QF_tickXISR(0); // process time events for tick rate 0
+}
+
+//============================================================================
+// QF callbacks...
+void QF_onStartup(void) {
+    // https://sites.google.com/site/qeewiki/books/avr-guide/timers-on-the-atmega328
+    // set Timer2 in CTC mode, start the timer ticking...
+    TCCR2A = (1U &lt;&lt; WGM21) | (0U &lt;&lt; WGM20); // CTC mode
+    // Set Timer2 prescaler to 1/1024 
+    TCCR2B = (1U &lt;&lt; CS22 ) | (1U &lt;&lt; CS21) | (1U &lt;&lt; CS20); // 1/2^10, Clock / 1024 
+
+    //select asynchronous operation of timer2 (32,768kHz)
+    // For more on ASSR, see https://goo.gl/nsi2DB
+    ASSR  &amp;= ~(1U &lt;&lt; AS2);
+
+    // enable TIMER2 compare Interrupt
+    TIMSK2 = (1U &lt;&lt; OCIE2A); 
+
+    // Reset timer count
+    TCNT2  = 0U; 
+
+    // set the output-compare register based on the desired tick frequency
+    // OCRn =  [ (clock_speed / Prescaler_value) * Desired_time_in_Seconds ] - 1
+    OCR2A  = (F_CPU / BSP_TICKS_PER_SEC / 1024U) - 1U;
+}
+//............................................................................
+void QV_onIdle(void) {   // called with interrupts DISABLED
+    // Put the CPU and peripherals to the low-power mode. You might
+    // need to customize the clock management for your application,
+    // see the datasheet for your particular AVR MCU.
+    SMCR = (0 &lt;&lt; SM0) | (1 &lt;&lt; SE); // idle mode, adjust to your project
+    QV_CPU_SLEEP();  // atomically go to sleep and enable interrupts
+}
+//............................................................................
+void Q_onAssert(char const Q_ROM * const file, int line) {
+    // implement the error-handling policy for your application!!!
+    QF_INT_DISABLE(); // disable all interrupts
+    QF_RESET();  // reset the CPU
+}
+
+//============================================================================
+// define all AO classes (state machine)...
+$define(AOs::HCSR04)
+$define(AOs::HCSR04Meas)
+//...
+</text>
+  </file>
+ </directory>
+</model>
