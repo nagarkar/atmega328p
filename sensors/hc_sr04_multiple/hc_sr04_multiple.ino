@@ -26,8 +26,14 @@
 #include <ST_HW_HC_SR04.h>
 
 
-#define SR04_TRIG_PIN_0 8
 #define SR04_ECHO_PIN_0 7
+#define SR04_TRIG_PIN_0 8
+
+#define SR04_ECHO_PIN_1 9
+#define SR04_TRIG_PIN_1 10
+
+#define SR04_ECHO_PIN_2 11
+#define SR04_TRIG_PIN_2 12
 
 
 //============================================================================
@@ -58,12 +64,15 @@ typedef struct HCSR04 {
     int distance_cm = 0;
     unsigned long n_measurements = 0;
     unsigned long start_time_micros;
+    unsigned long min_measurement_interval_micros = 25*1000;
+    uint8_t state_id;
 } HCSR04;
 
 /* protected: */
 static QState HCSR04_initial(HCSR04 * const me);
 static QState HCSR04_wait_for_echo(HCSR04 * const me);
 static QState HCSR04_wait_for_echo_done(HCSR04 * const me);
+static QState HCSR04_throttle_wait(HCSR04 * const me);
 /*$enddecl${AOs::HCSR04} ###################################################*/
 /*$declare${AOs::HCSR04Meas} ###############################################*/
 /*${AOs::HCSR04Meas} .......................................................*/
@@ -72,7 +81,11 @@ typedef struct HCSR04Meas {
     QActive super;
 
 /* public: */
-    HCSR04 * AO_HCSR04;
+    HCSR04 ** AO_HCSR04;
+    const int period = 3;
+    unsigned long elapsed_time;
+    unsigned long prev_nMeasurements;
+    int n_AOs;
 } HCSR04Meas;
 
 /* protected: */
@@ -84,43 +97,71 @@ static QState HCSR04Meas_Measure(HCSR04Meas * const me);
 
 // Create Pin Change Listeners
 void onPinChange(byte pin, byte changeKind);
-PciListenerImp listener(SR04_ECHO_PIN_0, onPinChange);
+PciListenerImp listener_0(SR04_ECHO_PIN_0, onPinChange);
+PciListenerImp listener_1(SR04_ECHO_PIN_1, onPinChange);
+PciListenerImp listener_2(SR04_ECHO_PIN_2, onPinChange);
 
 // Create Sensors
 ST_HW_HC_SR04 ultrasonicSensor_0(SR04_TRIG_PIN_0, SR04_ECHO_PIN_0);
-ST_HW_HC_SR04 sensors[] = {ultrasonicSensor_0};
+ST_HW_HC_SR04 ultrasonicSensor_1(SR04_TRIG_PIN_1, SR04_ECHO_PIN_1);
+ST_HW_HC_SR04 ultrasonicSensor_2(SR04_TRIG_PIN_2, SR04_ECHO_PIN_2);
 
 
 // Create AO instances and event queue buffers for them...
-HCSR04 AO_HCSR04;
+HCSR04 AO_HCSR04_0;
+HCSR04 AO_HCSR04_1;
+HCSR04 AO_HCSR04_2;
+
+HCSR04* AO_HCSR04_Array[3] = {&AO_HCSR04_0, &AO_HCSR04_1, &AO_HCSR04_2};
+
 HCSR04Meas AO_HCSR04Meas;
 
 // Define the pinchange event handler
 void onPinChange(byte pin, byte changeKind) {
     //Serial.print("Pn:"); Serial.println(pin);
-//    Serial.print("Ck:"); Serial.println(changeKind);
-    if (pin == SR04_ECHO_PIN_0) {
-        if (changeKind == CHANGEKIND_LOW_TO_HIGH) {
-            QActive_postXISR_((QActive *)&AO_HCSR04, 1U, ECHO_START_SIG, 0U);
-            //Serial.print("Posted ISR0");
-            //Serial.println((unsigned int)micros());
-        } else if (changeKind == CHANGEKIND_HIGH_TO_LOW) {
-            QActive_postXISR_((QActive *)&AO_HCSR04, 1U, ECHO_END_SIG, 0U);
-            //Serial.print("Posted ISR1");
-            //Serial.println((unsigned int)micros());
-        }
+    //Serial.print("Ck:"); Serial.println(changeKind);
+    Signals sig = ECHO_END_SIG;
+    if (changeKind == CHANGEKIND_LOW_TO_HIGH) {
+        sig = ECHO_START_SIG;
+    }
+    HCSR04 * l_AO_HCSR04 = 0;
+    switch(pin) {
+        case SR04_ECHO_PIN_0:
+            l_AO_HCSR04 = &AO_HCSR04_0;
+            break;
+        case SR04_ECHO_PIN_1:
+            l_AO_HCSR04 = &AO_HCSR04_1;
+            break;
+        case SR04_ECHO_PIN_2:
+            l_AO_HCSR04 = &AO_HCSR04_2;
+            break;
+        default:
+            Serial.println("Fatal: Unknown Pin Interrupt");
+            break;
+    }
+    if (l_AO_HCSR04 != 0) {
+        QActive_postXISR_((QActive *)l_AO_HCSR04, 1U, sig, 0U);
+        return;
     }
 }
-static QEvt l_HCSR04QSto[10];
+
+static QEvt l_HCSR04_0_QSto[10];
+static QEvt l_HCSR04_1_QSto[10];
+static QEvt l_HCSR04_2_QSto[10];
+
 static QEvt l_HCSR04MeasQSto[10];
 //...
 
 //============================================================================
 // QF_active[] array defines all active object control blocks ----------------
 QActiveCB const Q_ROM QF_active[] = {
-    { (QActive *)0,               (QEvt *)0,        0U                  },
-    { (QActive *)&AO_HCSR04,      l_HCSR04QSto,     Q_DIM(l_HCSR04QSto) },
-    { (QActive *)&AO_HCSR04Meas,  l_HCSR04MeasQSto, Q_DIM(l_HCSR04MeasQSto) }
+    { (QActive *)0,               (QEvt *)0,        0U                          },
+
+    { (QActive *)&AO_HCSR04_0,    l_HCSR04_0_QSto,  Q_DIM(l_HCSR04_0_QSto)      },
+    { (QActive *)&AO_HCSR04_1,    l_HCSR04_1_QSto,  Q_DIM(l_HCSR04_1_QSto)      },
+    { (QActive *)&AO_HCSR04_2,    l_HCSR04_2_QSto,  Q_DIM(l_HCSR04_2_QSto)      },
+
+    { (QActive *)&AO_HCSR04Meas,  l_HCSR04MeasQSto, Q_DIM(l_HCSR04MeasQSto)     }
 };
 
 
@@ -130,14 +171,23 @@ void setup() {
     QF_init(Q_DIM(QF_active));
 
     // initialize all AOs...
-    AO_HCSR04.sensor = &ultrasonicSensor_0;
-    QActive_ctor(&AO_HCSR04.super,     Q_STATE_CAST(&HCSR04_initial));
+    AO_HCSR04_0.sensor = &ultrasonicSensor_0;
+    QActive_ctor(&AO_HCSR04_0.super,     Q_STATE_CAST(&HCSR04_initial));
+    AO_HCSR04_1.sensor = &ultrasonicSensor_1;
+    QActive_ctor(&AO_HCSR04_1.super,     Q_STATE_CAST(&HCSR04_initial));
+    AO_HCSR04_2.sensor = &ultrasonicSensor_2;
+    QActive_ctor(&AO_HCSR04_2.super,     Q_STATE_CAST(&HCSR04_initial));
 
-    AO_HCSR04Meas.AO_HCSR04 = &AO_HCSR04;
+    AO_HCSR04Meas.AO_HCSR04 = AO_HCSR04_Array;
+    AO_HCSR04Meas.n_AOs = sizeof(AO_HCSR04_Array)/sizeof(HCSR04 *);
+
+
     QActive_ctor(&AO_HCSR04Meas.super, Q_STATE_CAST(&HCSR04Meas_initial));
 
     Serial.begin(38400);
-    PciManager.registerListener(&listener);
+    PciManager.registerListener(&listener_0);
+    PciManager.registerListener(&listener_1);
+    PciManager.registerListener(&listener_2);
     Serial.println("ready");
 }
 
@@ -201,7 +251,11 @@ void Q_onAssert(char const Q_ROM * const file, int line) {
 /*${AOs::HCSR04::SM} .......................................................*/
 static QState HCSR04_initial(HCSR04 * const me) {
     /*${AOs::HCSR04::SM::initial} */
-    me->start_time_micros = micros();
+    Serial.print("Sensor Started at Echo Pin:"); Serial.println(me->sensor->getEchoPin());
+    //Serial.print("State Machine address:"); Serial.println((int)me);
+
+    me->echo_time = 0;
+    me->distance_cm = 0;
     return Q_TRAN(&HCSR04_wait_for_echo);
 }
 /*${AOs::HCSR04::SM::wait_for_echo} ........................................*/
@@ -210,11 +264,12 @@ static QState HCSR04_wait_for_echo(HCSR04 * const me) {
     switch (Q_SIG(me)) {
         /*${AOs::HCSR04::SM::wait_for_echo} */
         case Q_ENTRY_SIG: {
+            me->state_id = 0;
+
             QActive_armX((QActive *)me, 0U, BSP_TICKS_PER_SEC/10, 0);
 
-            me->echo_time = 0;
-            me->distance_cm = 0;
-
+            // Record start time and trigger pulse
+            me->start_time_micros = micros();
             me->sensor->triggerPulse();
 
             //Serial.println("ST");
@@ -229,7 +284,7 @@ static QState HCSR04_wait_for_echo(HCSR04 * const me) {
         }
         /*${AOs::HCSR04::SM::wait_for_echo::Q_TIMEOUT} */
         case Q_TIMEOUT_SIG: {
-            //Serial.print("Timeout1");
+            Serial.print("Timeout1");
             status_ = Q_TRAN(&HCSR04_wait_for_echo);
             break;
         }
@@ -253,6 +308,8 @@ static QState HCSR04_wait_for_echo_done(HCSR04 * const me) {
     switch (Q_SIG(me)) {
         /*${AOs::HCSR04::SM::wait_for_echo_done} */
         case Q_ENTRY_SIG: {
+            me->state_id = 0;
+
             QActive_armX((QActive *)me, 0U, BSP_TICKS_PER_SEC/10, 0);
 
             //Serial.println("In Done");
@@ -270,23 +327,58 @@ static QState HCSR04_wait_for_echo_done(HCSR04 * const me) {
             unsigned long now = micros();
             //Serial.println((unsigned int)now);
 
-            me->echo_time = max(0, now - me->echo_start_time);
+            //me->echo_time = max(0, now - me->echo_start_time);
+            me->echo_time = now - me->echo_start_time;
 
             // Divide by 2 to account for the roundtrip
             // 29 is a fixed constant based on the speed of sound.
             me->distance_cm = me->echo_time/(2*29);
 
-            //Serial.println("Distance:");
+            //Serial.print(me->sensor->getEchoPin()); Serial.print(":");
             //Serial.println(me->distance_cm);
             //Serial.println("Time:");Serial.println(me->echo_time);
 
             me->n_measurements++;
-            status_ = Q_TRAN(&HCSR04_wait_for_echo);
+            status_ = Q_TRAN(&HCSR04_throttle_wait);
             break;
         }
         /*${AOs::HCSR04::SM::wait_for_echo_do~::Q_TIMEOUT} */
         case Q_TIMEOUT_SIG: {
-            //Serial.print("Timeout2");
+            Serial.print("Timeout2");
+            status_ = Q_TRAN(&HCSR04_wait_for_echo);
+            break;
+        }
+        default: {
+            status_ = Q_SUPER(&QHsm_top);
+            break;
+        }
+    }
+    return status_;
+}
+/*${AOs::HCSR04::SM::throttle_wait} ........................................*/
+static QState HCSR04_throttle_wait(HCSR04 * const me) {
+    QState status_;
+    switch (Q_SIG(me)) {
+        /*${AOs::HCSR04::SM::throttle_wait} */
+        case Q_ENTRY_SIG: {
+            int timer_interval_ms = (me->min_measurement_interval_micros - me->echo_time)/1000;
+
+            if (timer_interval_ms > 0) {
+                QActive_armX((QActive *)me, 0U, timer_interval_ms, 0);
+            } else {
+                Q_TRAN(&HCSR04_wait_for_echo);
+            }
+            status_ = Q_HANDLED();
+            break;
+        }
+        /*${AOs::HCSR04::SM::throttle_wait} */
+        case Q_EXIT_SIG: {
+            QActive_disarmX((QActive *)me, 0U);
+            status_ = Q_HANDLED();
+            break;
+        }
+        /*${AOs::HCSR04::SM::throttle_wait::Q_TIMEOUT} */
+        case Q_TIMEOUT_SIG: {
             status_ = Q_TRAN(&HCSR04_wait_for_echo);
             break;
         }
@@ -303,7 +395,8 @@ static QState HCSR04_wait_for_echo_done(HCSR04 * const me) {
 /*${AOs::HCSR04Meas::SM} ...................................................*/
 static QState HCSR04Meas_initial(HCSR04Meas * const me) {
     /*${AOs::HCSR04Meas::SM::initial} */
-    QActive_armX((QActive *)me, 0U, 10*BSP_TICKS_PER_SEC, 10*BSP_TICKS_PER_SEC);
+    int timerInterval = me->period*BSP_TICKS_PER_SEC;
+    QActive_armX((QActive *)me, 0U, timerInterval , timerInterval);
     return Q_TRAN(&HCSR04Meas_Measure);
 }
 /*${AOs::HCSR04Meas::SM::Measure} ..........................................*/
@@ -312,19 +405,49 @@ static QState HCSR04Meas_Measure(HCSR04Meas * const me) {
     switch (Q_SIG(me)) {
         /*${AOs::HCSR04Meas::SM::Measure} */
         case Q_ENTRY_SIG: {
-            unsigned long nMeasurements = me->AO_HCSR04->n_measurements;
-            unsigned long start_time = me->AO_HCSR04->start_time_micros;
-            float elapsed_time_sec= ((float)micros() - start_time)/(1000*1000);
 
-            Serial.print("nMeasurements:");
-            Serial.println(nMeasurements);
-            Serial.print("Meas/sec:");
-            Serial.println(nMeasurements/elapsed_time_sec);
+            //Serial.print("First Array loc'n:");Serial.println((int)&me->AO_HCSR04[0]);
+
+            if (me->elapsed_time > 0) {
+                for (int i = 0; i < me->n_AOs; i++) {
+                    Serial.print("Sensor with echo pin:");
+                    Serial.println(me->AO_HCSR04[i]->sensor->getEchoPin());
+
+                    unsigned long nMeasurements = me->AO_HCSR04[i]->n_measurements;
+                    int distance_cm = me->AO_HCSR04[i]->distance_cm;
+                    long echo_time = me->AO_HCSR04[i]->echo_time;
+                    uint8_t state_id = me->AO_HCSR04[i]->state_id;
+
+                    Serial.print("nMeasurements:");
+                    Serial.println(nMeasurements);
+                    Serial.print("Cum Meas/sec:");
+                    Serial.println(nMeasurements/me->elapsed_time);
+                    Serial.print("State:");
+                    Serial.println(state_id);
+                    Serial.print("Last Distance Measured:");
+                    Serial.println(distance_cm);
+                    Serial.print("Last Echo Time:");
+                    Serial.println(echo_time);
+
+
+                    if (i == 0) {
+                        Serial.print("Meas/sec (this period, first Sensor):");
+                        Serial.println((nMeasurements - me->prev_nMeasurements)/me->period);
+                        me->prev_nMeasurements = nMeasurements;
+                    }
+                    Serial.println("-----------------");
+                }
+
+                Serial.println("*****************************");
+            }
+
+
             status_ = Q_HANDLED();
             break;
         }
         /*${AOs::HCSR04Meas::SM::Measure::Q_TIMEOUT} */
         case Q_TIMEOUT_SIG: {
+            me->elapsed_time += me->period;
             status_ = Q_TRAN(&HCSR04Meas_Measure);
             break;
         }
